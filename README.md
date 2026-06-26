@@ -1,4 +1,6 @@
-<img width="2752" height="1536" alt="Gemini_Generated_Image_ug0arsug0arsug0a" src="https://github.com/user-attachments/assets/beabbfef-cba9-40af-93b3-4470733872fd" />
+
+<img width="1376" height="768" alt="na" src="https://github.com/user-attachments/assets/eb513be2-56d0-4fa1-88e8-2a53b7f61d74" />
+
 
 # Betaflight ADRC Controller (Active Disturbance Rejection Control)
 
@@ -8,7 +10,8 @@ This repository implements **Active Disturbance Rejection Control (ADRC)** on Be
 
 ## For more Info
 
-<img width="2752" height="1536" alt="Gemini_Generated_Image_ug0arsug0arsug0a" src="https://github.com/user-attachments/assets/c3ce294c-ba1f-498c-a88b-c4860ff037eb"(https://youtu.be/BLTQN-Gw7LE) />
+<img width="2752" height="1536" alt="1T" src="https://github.com/user-attachments/assets/0e7b9a59-aff6-4e84-ac83-92dbd45ac3cc" />
+https://youtu.be/BLTQN-Gw7LE
 
 
 
