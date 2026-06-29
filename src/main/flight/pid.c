@@ -1374,8 +1374,11 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
             pidData[axis].Sum = pidSum;
         }
 
-        // Save actual control output for next iteration of ADRC observer
-        pidRuntime.adrc_lastOutput[axis] = pidData[axis].Sum;
+        // Save actual control output for next iteration of ADRC observer.
+        // Clamp to the per-axis pidsum limit so the ESO is fed the command that can
+        // actually reach the plant, instead of absorbing mixer clipping as a fake disturbance.
+        const float adrcOutLimit = (axis == FD_YAW) ? PIDSUM_LIMIT_YAW : PIDSUM_LIMIT;
+        pidRuntime.adrc_lastOutput[axis] = constrainf(pidData[axis].Sum, -adrcOutLimit, adrcOutLimit);
     }
 
 #ifdef USE_WING
