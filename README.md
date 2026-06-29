@@ -6,6 +6,15 @@
 
 This repository implements **Active Disturbance Rejection Control (ADRC)** on Betaflight, completely replacing the traditional PID loop. ADRC acts as a "PID Killer"—providing incredible stability, robust wind resistance, and smooth handling even with uncalibrated parameters, changing propeller sizes, or extreme, unbalanced dynamic payloads.
 
+> ⚠️ **Experimental robustness fixes on this fork — flight testers wanted!**
+> This fork carries a series of small, independent ADRC robustness fixes on top of
+> `Boyyt357/ADRC-betaflight` (anti-windup on the disturbance estimate, saturation-aware
+> observer feedback, ADRC-tuned defaults, zero-throttle observer handling, plus one
+> experimental change). **They are UNTESTED on real hardware.** Each fix is its own commit so
+> you can build with or without any of them (`git revert <sha>`). Details and rationale in
+> [`ADRC_FIXES.md`](ADRC_FIXES.md). If you fly it, **please report results in the issues** —
+> what you flew, which commits, and how it behaved. 🙏
+
 ---
 
 ## For more Info
