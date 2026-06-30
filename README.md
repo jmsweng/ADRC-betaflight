@@ -55,6 +55,16 @@ set pid_at_min_throttle = off
 | 10" drone (author's video) | 10 | 50 | 20 |
 | 5" drone (jmsweng) | 10 | 110 | 100 |
 
+### Tuning procedure (community, from @jmsweng)
+A sensible step-by-step instead of guessing, starting from `10 / 50 / 20` (P/I/D):
+1. **System Gain (D):** raise until the quad takes off stably (~70 on a 5"), keep raising until it makes a stuttering noise in hover, then back off ~20%. *(Overestimating b0 is fairly harmless; underestimating causes instability.)*
+2. **Observer Bandwidth (I):** raise until stuttering/chatter appears in hover, then back off ~20%. *(Too high and the observer starts tracking gyro noise.)*
+3. **Control Bandwidth (P):** set to ~¼ of the Observer Bandwidth (the wo ≈ 3–5×wc rule of thumb).
+
+Example end state on a 5" (640 g, DAKEFPVF405, 4S, 2300 kV, Gemfan Hurricane 51433-3): **40 / 160 / 200** — in tests this resisted a leaf-blower and being hit with a stick mid-air, and flew with 20–40% of AUW hung off one motor arm.
+
+> **Takeoff note:** the rate ESO doesn't model gravity, so on throttle-up there's often a brief (sub-second) oscillation/bounce before it settles — some pilots report this as "unpredictable on arm". `set pid_at_min_throttle = off` (above) helps, and a firm toss-launch avoids it.
+
 ---
 
 ## Compiling ADRC-Betaflight
