@@ -39,7 +39,12 @@
 #define PIDSUM_LIMIT_MIN            100
 #define PIDSUM_LIMIT_MAX            1000
 
-#define PID_GAIN_MAX 250
+// In this ADRC fork the P/I/D gain bytes are reinterpreted as ADRC tuning
+// parameters (P=wc, I=wo, D=b0/ADRC_B0_SCALE), so there is no reason to keep
+// the legacy 250 safety margin below the byte ceiling. Allow the full uint8_t
+// range. 255 is the HARD limit of the uint8_t pid[].D field: going higher
+// would require widening the field, which breaks MSP/blackbox wire format.
+#define PID_GAIN_MAX 255
 #define F_GAIN_MAX 1000
 
 // Scaling factors for Pids for better tunable range in configurator for betaflight pid controller. The scaling is based on legacy pid controller or previous float
