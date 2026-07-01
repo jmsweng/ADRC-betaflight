@@ -1347,13 +1347,19 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         }
 #endif
 
-        // Add P boost from antiGravity when sticks are close to zero
+        // Anti-gravity P boost (legacy PID heuristic): DISABLED under ADRC.
+        // Anti-gravity raises P during throttle transients to fight throttle-sag
+        // torque. Under this ADRC controller the observer's disturbance estimate
+        // (z3, exposed as the I channel = -z3/b0) already rejects that torque, so
+        // multiplying the tuned virtual stiffness (kp = wc^2) by the boost only
+        // injects a transient overshoot exactly at spool-up/takeoff. The boost is
+        // still computed and logged so it can be studied; to restore the classic
+        // behavior, revert this commit (re-add `pidData[axis].P *= antiGravityPBoost`).
         if (axis != FD_YAW) {
             float agSetpointAttenuator = fabsf(currentPidSetpoint) / 50.0f;
             agSetpointAttenuator = MAX(agSetpointAttenuator, 1.0f);
             // attenuate effect if turning more than 50 deg/s, half at 100 deg/s
             const float antiGravityPBoost = 1.0f + (pidRuntime.antiGravityThrottleD / agSetpointAttenuator) * pidRuntime.antiGravityPGain;
-            pidData[axis].P *= antiGravityPBoost;
             if (axis == FD_PITCH) {
                 DEBUG_SET(DEBUG_ANTI_GRAVITY, 3, lrintf(antiGravityPBoost * 1000));
             }
