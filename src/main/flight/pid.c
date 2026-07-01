@@ -1288,6 +1288,22 @@ void FAST_CODE pidController(const pidProfile_t *pidProfile, timeUs_t currentTim
         const float adrcZ3Limit = b0 * ((axis == FD_YAW) ? PIDSUM_LIMIT_YAW : PIDSUM_LIMIT);
         pidRuntime.adrc_z3[axis] = constrainf(pidRuntime.adrc_z3[axis], -adrcZ3Limit, adrcZ3Limit);
 
+        // Expose the ESO states to blackbox so testers can actually see the observer.
+        // roll: z1/z2/z3 in [0..2]; pitch: z1/z2/z3 in [3..5]; yaw z3 in [6]; pitch b0 in [7].
+        // z1 = estimated rate (deg/s), z2 = estimated accel, z3 = estimated total disturbance.
+        if (axis == FD_ROLL) {
+            DEBUG_SET(DEBUG_ADRC, 0, lrintf(pidRuntime.adrc_z1[axis]));
+            DEBUG_SET(DEBUG_ADRC, 1, lrintf(pidRuntime.adrc_z2[axis]));
+            DEBUG_SET(DEBUG_ADRC, 2, lrintf(pidRuntime.adrc_z3[axis]));
+        } else if (axis == FD_PITCH) {
+            DEBUG_SET(DEBUG_ADRC, 3, lrintf(pidRuntime.adrc_z1[axis]));
+            DEBUG_SET(DEBUG_ADRC, 4, lrintf(pidRuntime.adrc_z2[axis]));
+            DEBUG_SET(DEBUG_ADRC, 5, lrintf(pidRuntime.adrc_z3[axis]));
+            DEBUG_SET(DEBUG_ADRC, 7, lrintf(b0));
+        } else { // FD_YAW
+            DEBUG_SET(DEBUG_ADRC, 6, lrintf(pidRuntime.adrc_z3[axis]));
+        }
+
         // Control Law (Virtual PD)
         float kp = wc * wc;
         float kd = 2.0f * wc;
