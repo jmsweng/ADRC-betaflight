@@ -324,6 +324,16 @@ void adrcResetProfile(adrcProfile_t *adrcProfile)
     // ADRC-021 A/B selector (see adrcB0Law_e). Quadratic = the shipped behavior, kept as default
     // so a profile reset flies exactly like b4; set sqrt/linear/fixed per PID profile to compare.
     adrcProfile->b0Law = ADRC_B0_LAW_QUADRATIC;
+    // EXPERIMENTAL fix for ground takeoff (grounded ESO gyro LPF): ON by default (groundGyroFilterHz
+    // = 5, held 50 ms past liftoff). An aggressive tune where wc is close to wo may fly fine but
+    // self-oscillate at idle where the plant provides no damping; the grounded cutoff (a few x below
+    // the observer ring ~wo/2pi) damps that on-ground z1/z2 ring, then gyroFilterHz is restored once
+    // the craft is climbing. Set groundGyroFilterHz = 0 to disable (grounded uses gyroFilterHz).
+    // Note: 5 Hz is well below the ~wo/2pi ring and adds noticeable phase lag inside the observer
+    // loop, which in theory could sustain a slow grounded wobble of its own - but in testing it
+    // does not cause significant ground wobble, so it is used as the default.
+    adrcProfile->groundGyroFilterHz = 5;
+    adrcProfile->groundGyroHoldMs = 50;
 }
 
 void adrcInitConfig(const adrcProfile_t *adrcProfile, adrcRuntime_t *adrcRuntime, float dT)
@@ -375,6 +385,16 @@ void adrcInitConfig(const adrcProfile_t *adrcProfile, adrcRuntime_t *adrcRuntime
         const float gyroFilterGain = (gyroFilterHz > 0.0f && validDt)
             ? pt2FilterGain(gyroFilterHz, dT) : 1.0f;
         pt2FilterUpdateCutoff(&adrcRuntime->gyroFilter[axis], gyroFilterGain);
+
+        // EXPERIMENTAL fix for ground takeoff: cache the flight gain and precompute the grounded
+        // gain, so the per-loop cutoff selector in adrcUpdatePerLoopState() can switch the live
+        // filter between them without touching the profile. groundGyroFilterHz 0 -> gain 0, which
+        // the selector reads as "no grounded override" and leaves the flight gain in place on the
+        // ground too.
+        c->flightGyroFilterGain = gyroFilterGain;
+        const float groundGyroFilterHz = fminf(adrcProfile->groundGyroFilterHz, LPF_MAX_HZ);
+        c->groundGyroFilterGain = (groundGyroFilterHz > 0.0f && validDt)
+            ? pt2FilterGain(groundGyroFilterHz, dT) : 0.0f;
     }
 
     adrcRuntime->b0ThrottleScale = 1.0f;
@@ -477,6 +497,9 @@ void adrcResetGate(adrcRuntime_t *adrcRuntime)
     adrcRuntime->liftoff = false;
     adrcRuntime->gyroActiveS = 0.0f;
     adrcRuntime->appliedActiveS = 0.0f;
+    // EXPERIMENTAL fix for ground takeoff: leave the grounded cutoff engaged after a gate reset;
+    // adrcUpdatePerLoopState() re-primes this from the profile every grounded loop before it is used.
+    adrcRuntime->groundGyroHoldS = 0.0f;
     // adrcUpdatePerLoopState() recomputes this every loop, and since ADRC-026 nothing in the
     // control path reads the cached copy at all. Seed it to the grounded-and-idle assumption
     // anyway, so a reader added later cannot pair a closed gate with a stale "stick raised".
@@ -619,6 +642,33 @@ void adrcUpdatePerLoopState(adrcRuntime_t *adrcRuntime, const adrcProfile_t *adr
                 adrcRuntime->appliedActiveS = 0.0f;
             }
         }
+    }
+
+    // EXPERIMENTAL fix for ground takeoff (grounded observer-input LPF): an aggressive tune where
+    // the control bandwidth (wc) is close to the observer bandwidth (wo) may be stable in flight,
+    // but self-oscillates at idle where the plant provides no damping (tiny oscillations in flight
+    // are damped out by aerodynamic drag and other effects). So the ESO z1/z2 loop rings at ~wo and
+    // (with pid_at_min_throttle ON) spins up the motors on arm. To fix this, while grounded (and for
+    // groundGyroHoldMs after liftoff latches) the ESO gyro input runs through the lower grounded
+    // cutoff, adding roll-off INSIDE the observer loop damping the ring; once the hold expires the
+    // normal flight cutoff is restored, so the transition to the raw-ish gyro happens once the craft
+    // is safely climbing. Both gains are precomputed per axis in adrcInitConfig(); a grounded gain
+    // of 0 means "no override" so the flight cutoff is used throughout and this reduces to the stock
+    // behavior. Applied via pt2FilterUpdateCutoff() (gain-only, states untouched), so there is no
+    // filter re-convergence transient when the cutoff switches - only the corner frequency changes.
+    if (!wasLiftoff) {
+        // grounded (or gate re-armed by an epoch reset while disarmed): keep the hold primed
+        adrcRuntime->groundGyroHoldS = adrcProfile->groundGyroHoldMs * 0.001f;
+    } else if (adrcRuntime->groundGyroHoldS > 0.0f) {
+        // airborne: run out the post-liftoff hold, then release to the flight cutoff
+        adrcRuntime->groundGyroHoldS -= finiteDt;
+    }
+    const bool groundGyroActive = !adrcRuntime->liftoff || adrcRuntime->groundGyroHoldS > 0.0f;
+    for (int axis = FD_ROLL; axis <= FD_YAW; axis++) {
+        const adrcCoefficient_t *c = &adrcRuntime->coefficient[axis];
+        const bool useGrounded = groundGyroActive && c->groundGyroFilterGain > 0.0f;
+        pt2FilterUpdateCutoff(&adrcRuntime->gyroFilter[axis],
+            useGrounded ? c->groundGyroFilterGain : c->flightGyroFilterGain);
     }
 
     if (!wasLiftoff && adrcRuntime->liftoff) {

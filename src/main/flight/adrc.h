@@ -108,6 +108,19 @@ typedef struct adrcProfile_s {
                                 // hoverThrottlePercent above); scaling is never applied below 1x
     uint8_t b0Law;              // adrcB0Law_e: which throttle->b0 schedule shape to apply (ADRC-021
                                 // A/B selector, not per-axis)
+    uint16_t groundGyroFilterHz; // EXPERIMENTAL fix for ground takeoff: an aggressive tune where the
+                                 // control bandwidth (wc) is close to the observer bandwidth (wo)
+                                 // may be stable in flight, but self-oscillates at idle where the
+                                 // plant provides no damping (tiny oscillations in flight are damped
+                                 // out by aerodynamic drag and other effects). This is an extra
+                                 // (lower) ESO gyro-input cutoff applied only while grounded, to
+                                 // damp that on-ground z1/z2 ring. 0 = disabled (grounded uses the
+                                 // normal gyroFilterHz). Not per-axis.
+    uint16_t groundGyroHoldMs;   // EXPERIMENTAL fix for ground takeoff: keep the grounded cutoff
+                                 // active this many ms after liftoff before restoring gyroFilterHz,
+                                 // so the transition to the raw gyro happens once the craft is
+                                 // safely climbing rather than at the delicate just-unstuck moment.
+                                 // Separate from liftoffHoldMs. Not per-axis.
 } adrcProfile_t;
 
 #ifdef USE_ADRC
@@ -146,6 +159,15 @@ typedef struct adrcCoefficient_s {
                            // gatedZ3DecayRate * 0.1: adrcInitConfig() clamps the profile value,
                            // then takes the max against decayRate above and a 1/s floor.
                            // Precomputed so adrcApplyControl() doesn't need the profile pointer
+    float groundGyroFilterGain; // EXPERIMENTAL fix for ground takeoff: pt2 gain for
+                                 // groundGyroFilterHz at the runtime looptime (per-axis, mirrors
+                                 // gyroFilterGain). 0 (== groundGyroFilterHz 0) means "no grounded
+                                 // override" and the flight gyroFilterGain is used on the ground
+                                 // too. Selected into the live filter per loop by
+                                 // adrcUpdatePerLoopState() based on the liftoff latch + hold timer.
+    float flightGyroFilterGain; // EXPERIMENTAL fix for ground takeoff: pt2 gain for the normal
+                                 // gyroFilterHz, cached so the per-loop cutoff selector can restore
+                                 // it without the profile.
 } adrcCoefficient_t;
 
 // Runtime state, embedded as a single field in pidRuntime_t.
@@ -165,6 +187,10 @@ typedef struct adrcRuntime_s {
     float gyroActiveS;      // seconds of sustained gyro activity (liftoff detector)
     float appliedActiveS;   // seconds the applied collective has held above the liftoff threshold
                              // - the gate's third path, see ADRC_LIFTOFF_APPLIED_HOLD_S
+    float groundGyroHoldS;  // EXPERIMENTAL fix for ground takeoff: seconds the grounded gyro cutoff
+                             // stays active after liftoff before restoring the flight cutoff; primed
+                             // to groundGyroHoldMs while grounded, counted down once liftoff latches
+                             // (shared, not per-axis)
     bool throttleAtIdle;    // commanded collective is below the gyro path's throttle floor. The gate
                              // itself uses the local value computed in adrcUpdatePerLoopState(); this
                              // cached copy has no production reader left since the z3 inhibit stopped

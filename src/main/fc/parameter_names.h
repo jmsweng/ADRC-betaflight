@@ -265,6 +265,8 @@
 #define PARAM_NAME_ADRC_GATED_Z3_DECAY "adrc_gated_z3_decay"
 #define PARAM_NAME_ADRC_B0_SCALE_MAX "adrc_b0_scale_max"
 #define PARAM_NAME_ADRC_B0_LAW "adrc_b0_law"
+#define PARAM_NAME_ADRC_GROUND_GYRO_LPF_HZ "adrc_ground_gyro_lpf_hz"
+#define PARAM_NAME_ADRC_GROUND_GYRO_HOLD_MS "adrc_ground_gyro_hold_ms"
 
 #define PARAM_NAME_HORIZON_LEVEL_STRENGTH "horizon_level_strength"
 #define PARAM_NAME_HORIZON_LIMIT_DEGREES "horizon_limit_degrees"
