@@ -799,7 +799,10 @@ def axis_warnings(fit, bw, bw_fit, b0_values=None, adrc_flight=True):
     from the same numbers.
 
     fit       : the ADRC (closed-loop) fit dict, for wm_at_bound
-    bw        : a suggest_bandwidth() result dict
+    bw        : a suggest_bandwidth() result dict, or None when the bandwidth
+                analysis was skipped (suggest_wc=False). Then only the checks
+                on the b0 fit itself are made: controller consistency,
+                cross-method b0 spread, and an unresolved 2nd pole.
     bw_fit    : the fit the sweep was run against (eRPM path when available)
     b0_values : b0_eff from each method, for the cross-method spread check
     adrc_flight : False drops the checks that only mean something when the log
@@ -810,17 +813,18 @@ def axis_warnings(fit, bw, bw_fit, b0_values=None, adrc_flight=True):
     """
     f_val = bw_fit.get('f_valid_hz', float('nan')) if bw_fit else float('nan')
     flags = []
-    if bw['wc_max_at_bound']:
-        flags.append("identified plant has too little phase lag to bound wc")
-    if bw.get('wc_max_band_limited'):
-        flags.append(
-            f"wc ceiling is set by the identification band ({f_val:.0f} Hz), "
-            "not by measured phase lag -- treat it as an upper bound only")
-    if bw.get('cfg_extrapolated'):
-        flags.append(
-            f"wc={bw['wc_cfg']:.0f} puts the gain crossover at {bw['w_cross_cfg']/(2*np.pi):.0f} Hz, "
-            f"above the {f_val:.0f} Hz the plant was identified over "
-            "-- the PM above is extrapolation, not measurement")
+    if bw is not None:
+        if bw['wc_max_at_bound']:
+            flags.append("identified plant has too little phase lag to bound wc")
+        if bw.get('wc_max_band_limited'):
+            flags.append(
+                f"wc ceiling is set by the identification band ({f_val:.0f} Hz), "
+                "not by measured phase lag -- treat it as an upper bound only")
+        if bw.get('cfg_extrapolated'):
+            flags.append(
+                f"wc={bw['wc_cfg']:.0f} puts the gain crossover at {bw['w_cross_cfg']/(2*np.pi):.0f} Hz, "
+                f"above the {f_val:.0f} Hz the plant was identified over "
+                "-- the PM above is extrapolation, not measurement")
     cc = fit.get('ctrl_check') if hasattr(fit, 'get') else None
     if adrc_flight and cc and cc['ratio'] == cc['ratio']:
         if not (0.8 <= cc['ratio'] <= 1.25) or abs(cc['phase_deg']) > 15.0:
@@ -829,17 +833,19 @@ def axis_warnings(fit, bw, bw_fit, b0_values=None, adrc_flight=True):
                 f"(u/r is {cc['ratio']:.2f}x predicted, {cc['phase_deg']:+.0f} deg off) "
                 "-- the adrc-recovered G is unreliable here; trust ctrl-free/eRPM")
 
-    pk = bw.get('cl_peak_db', float('nan'))
-    if pk == pk and pk > 6.0:
-        flags.append(
-            f"closed loop peaks {pk:+.0f} dB at {bw['cl_peak_hz']:.1f} Hz "
-            "-- the loop is resonant, not just slow")
-    if adrc_flight:
-        if bw['pm_cfg'] == bw['pm_cfg'] and bw['pm_cfg'] < bw['pm_target']:
-            flags.append(f"configured wc leaves only {bw['pm_cfg']:.0f} deg PM")
-        f3 = bw['f_3db_hz']
-        if f3 == f3 and bw['w_3db'] > 0 and bw['wc_cfg'] / bw['w_3db'] > 3.0:
-            flags.append("achieved bandwidth far below wc -- check b0")
+    pk = float('nan')
+    if bw is not None:
+        pk = bw.get('cl_peak_db', float('nan'))
+        if pk == pk and pk > 6.0:
+            flags.append(
+                f"closed loop peaks {pk:+.0f} dB at {bw['cl_peak_hz']:.1f} Hz "
+                "-- the loop is resonant, not just slow")
+        if adrc_flight:
+            if bw['pm_cfg'] == bw['pm_cfg'] and bw['pm_cfg'] < bw['pm_target']:
+                flags.append(f"configured wc leaves only {bw['pm_cfg']:.0f} deg PM")
+            f3 = bw['f_3db_hz']
+            if f3 == f3 and bw['w_3db'] > 0 and bw['wc_cfg'] / bw['w_3db'] > 3.0:
+                flags.append("achieved bandwidth far below wc -- check b0")
     if b0_values:
         _v = np.array([v for v in b0_values if v == v])
         if len(_v) > 1 and (_v.max() - _v.min()) / max(_v.mean(), 1e-9) > 0.25:
@@ -855,7 +861,7 @@ def axis_warnings(fit, bw, bw_fit, b0_values=None, adrc_flight=True):
     # has something there the model never captured in the first place.
     # wc_max is an extrapolation from the fitted model, so either symptom
     # is reason to treat it as an unverified ceiling rather than a target.
-    if wm_flag or pk_flag:
+    if (wm_flag or pk_flag) and bw is not None:
         flags.append("wc estimates may be inaccurate -- "
                       + ("2nd pole unresolved" if wm_flag else "")
                       + (" and " if wm_flag and pk_flag else "")
@@ -868,7 +874,8 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
                                 f_lo=0.8, f_hi=15.0, coh_min=0.85,
                                 cross_check=True, use_rpm=True,
                                 include_dterm=False, out_dir='Output metrics',
-                                full_output=False, adrc_flight=True):
+                                full_output=False, adrc_flight=True,
+                                suggest_wc=True, save_outputs=True):
     '''
     Recovers and fits the open-loop plant for roll/pitch/yaw from a blackbox
     log, given the (wc, wo, b0) the flight was flown with.
@@ -884,6 +891,12 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
         warnings are dropped, and the controller-free recovery becomes the
         primary path. wc/wo/b0 are then read as the ADRC values you are
         *considering*, and the bandwidth table answers whether they would fly.
+    suggest_wc: False skips the whole bandwidth / wc analysis
+        (suggest_bandwidth): no achieved -3dB, closed-loop peak, phase margin
+        or max wc in the figure footer or metrics log, and only the b0-fit
+        warnings are kept. results[axis]['bandwidth'] is None.
+    save_outputs: False shows the figure but writes nothing to out_dir
+        (no Plant fit .png / .txt, and the folder is not created).
     use_rpm: also run the eRPM decomposition (needs dshot_bidir=1). This is
         the best-conditioned path for b0, since the u -> rotor-speed leg
         stays coherent past 25 Hz instead of dying with the sticks at 15 Hz.
@@ -895,7 +908,9 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
     '''
     df = load_blackbox_csv(csv_path)
     hdr = read_blackbox_header(csv_path)
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir = Path(out_dir)
+    if save_outputs:
+        out_dir.mkdir(parents=True, exist_ok=True)
     base = Path(csv_path).name.split('.')[0]
     out_png = out_dir / f'{base} Plant fit.png'
     out_txt = out_dir / f'{base} Plant fit.txt'
@@ -921,9 +936,10 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
                  "of each other; eRPM is.\n" if adrc_flight else
                  "Log not flown with ADRC: the adrc recovery is skipped and ctrl-free is the "
                  "primary path.\nwc/wo/b0 below are read as proposed values, not flown ones.\n")
-              + "Margin sweep includes header lag "
-              f"(gyro lpf2={_lag['gyro_lpf2']:.0f} Hz, delay={_lag['delay_s']*1e3:.2f} ms); "
-              "notches excluded, so margins stay slightly optimistic.")
+              + ("Margin sweep includes header lag "
+                 f"(gyro lpf2={_lag['gyro_lpf2']:.0f} Hz, delay={_lag['delay_s']*1e3:.2f} ms); "
+                 "notches excluded, so margins stay slightly optimistic."
+                 if suggest_wc else "").rstrip())
 
         for i, axis in enumerate(AXIS_NAMES):
             t, r, y, u = get_axis_signals(df, axis)
@@ -969,10 +985,12 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
                     order=order, nperseg=nperseg)
 
             bw_fit = fit_rpm if fit_rpm is not None else fit
-            bw = suggest_bandwidth(r, y, fs, bw_fit, wc_a[axis], wo_a[axis],
-                                   b0_a[axis], order=order, nperseg=nperseg,
-                                   hdr=hdr, include_dterm=include_dterm,
-                                   axis=axis, coh_min=coh_min)
+            bw = None
+            if suggest_wc:
+                bw = suggest_bandwidth(r, y, fs, bw_fit, wc_a[axis], wo_a[axis],
+                                       b0_a[axis], order=order, nperseg=nperseg,
+                                       hdr=hdr, include_dterm=include_dterm,
+                                       axis=axis, coh_min=coh_min)
 
             tf = plant_tf(fit)
             tt, h, st = plant_time_responses(fit)
@@ -1011,23 +1029,24 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
                 if abs(a_ - b_) > 2 * pooled:
                     msg += " -- model error dominates, use the range"
 
-            f3, f3sd = bw['f_3db_hz'], bw['f_3db_sd']
-            _pk = bw['cl_peak_db']
-            msg += ("\n         bandwidth: achieved -3dB = "
-                    + (f"{f3:5.2f} +/- {f3sd:4.2f} Hz ({bw['w_3db']:5.1f} rad/s)"
-                       if f3 == f3 else
-                       " n/a (never sustains -3dB inside the coherent band)")
-                    + f"   vs wc = {bw['wc_cfg']:.0f}"
-                    + (f"  [{bw['wc_cfg']/bw['w_3db']:.1f}x]" if f3 == f3 else "")
-                    + (f"\n         closed-loop peak = {_pk:+.1f} dB at "
-                       f"{bw['cl_peak_hz']:.1f} Hz" if _pk == _pk else ""))
-            msg += ("\n         max wc for "
-                    + f"{bw['pm_target']:.0f} deg PM = "
-                    + ("not bounded by this model" if bw['wc_max_at_bound']
-                       else f"{bw['wc_max']:5.0f} +/- {bw['wc_max_sd']:4.1f} rad/s")
-                    + f";   PM at {_cfgword} wc = "
-                    + (f"{bw['pm_cfg']:5.1f} +/- {bw['pm_cfg_sd']:4.2f} deg"
-                       if bw['pm_cfg'] == bw['pm_cfg'] else "n/a (|L|<1)"))
+            if suggest_wc:
+                f3, f3sd = bw['f_3db_hz'], bw['f_3db_sd']
+                _pk = bw['cl_peak_db']
+                msg += ("\n         bandwidth: achieved -3dB = "
+                        + (f"{f3:5.2f} +/- {f3sd:4.2f} Hz ({bw['w_3db']:5.1f} rad/s)"
+                           if f3 == f3 else
+                           " n/a (never sustains -3dB inside the coherent band)")
+                        + f"   vs wc = {bw['wc_cfg']:.0f}"
+                        + (f"  [{bw['wc_cfg']/bw['w_3db']:.1f}x]" if f3 == f3 else "")
+                        + (f"\n         closed-loop peak = {_pk:+.1f} dB at "
+                           f"{bw['cl_peak_hz']:.1f} Hz" if _pk == _pk else ""))
+                msg += ("\n         max wc for "
+                        + f"{bw['pm_target']:.0f} deg PM = "
+                        + ("not bounded by this model" if bw['wc_max_at_bound']
+                           else f"{bw['wc_max']:5.0f} +/- {bw['wc_max_sd']:4.1f} rad/s")
+                        + f";   PM at {_cfgword} wc = "
+                        + (f"{bw['pm_cfg']:5.1f} +/- {bw['pm_cfg_sd']:4.2f} deg"
+                           if bw['pm_cfg'] == bw['pm_cfg'] else "n/a (|L|<1)"))
 
             if ctrl_chk and ctrl_chk['ratio'] == ctrl_chk['ratio']:
                 msg += (f"\n         controller check: u/r is "
@@ -1070,32 +1089,23 @@ def fit_plant_from_csv_indirect(csv_path, wo, b0, wc, order=2, nperseg=8192,
         fig.suptitle(f"{base} — plant identified from closed loop",
                      fontsize=13, fontweight='bold')
 
-        # Variable size for footer text box in image
-        plot_h_in, title_h_in, margin_in, gap_in = 5.0, 0.55, 0.15, 0.25
-        footer = buf.getvalue().strip()
-
-        fig.set_size_inches(16, plot_h_in + title_h_in + margin_in + gap_in + 3.0)
-        txt = fig.text(0.02, 0.0, footer, ha='left', va='bottom', fontsize=7,
-                       family='monospace',
-                       bbox=dict(facecolor='whitesmoke', edgecolor='lightgray',
-                                  boxstyle='round,pad=0.5'))
-        fig.canvas.draw()
-        text_h_in = txt.get_window_extent(fig.canvas.get_renderer()).height / fig.dpi
-
-        total_h_in = plot_h_in + title_h_in + margin_in + text_h_in + gap_in
+        # Plots only -- the per-axis metrics text is printed below the
+        # figure (and written to the metrics log), not drawn into it.
+        plot_h_in, title_h_in, margin_in = 5.0, 0.3, 0.1
+        total_h_in = plot_h_in + title_h_in + margin_in
         fig.set_size_inches(16, total_h_in)
-        txt.set_y(margin_in / total_h_in)
+        plt.tight_layout(rect=[0, margin_in / total_h_in, 1,
+                               1 - title_h_in / total_h_in])
+        if save_outputs:
+            plt.savefig(out_png, dpi=150)
 
-        bottom = (margin_in + text_h_in + gap_in) / total_h_in
-        top = 1 - title_h_in / total_h_in
-        plt.tight_layout(rect=[0, bottom, 1, top])
-        plt.savefig(out_png, dpi=150)
-
-    with open(out_txt, 'w') as fh:
-        fh.write(buf.getvalue())
+    if save_outputs:
+        with open(out_txt, 'w') as fh:
+            fh.write(buf.getvalue())
     plt.show(); plt.close()
-    print(f"Saved plot to {out_png}")
-    print(f"Saved metrics log to {out_txt}")
+    if save_outputs:
+        print(f"Saved plot to {out_png}")
+        print(f"Saved metrics log to {out_txt}")
     return results
 
 def _txt_table(df):
@@ -1120,7 +1130,7 @@ def _txt_table(df):
 def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
                      f_hi=15.0, coh_min=0.85, cross_check=True, use_rpm=True,
                      include_dterm=False, out_dir='Output metrics', results=None,
-                     adrc_flight=True):
+                     adrc_flight=True, suggest_wc=True, save_outputs=True):
     '''
     Runs fit_plant_from_csv_indirect() (unless a precomputed `results` dict
     is passed in) and displays the b0 and bandwidth summary tables built
@@ -1129,6 +1139,12 @@ def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
     adrc_flight=False drops the closed-loop 'adrc' column and any warning
     that depends on it; see fit_plant_from_csv_indirect().
 
+    suggest_wc=False skips the bandwidth / wc analysis entirely: no bandwidth
+    table (bw_table is returned as None) and only the b0-fit warnings.
+
+    save_outputs=False writes no files: no plot/metrics log from the fit and
+    no summary tables .txt. Everything is still displayed in the notebook.
+
     Returns (results, b0_table, bw_table).
     '''
     if results is None:
@@ -1136,11 +1152,18 @@ def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
             csv_path, wo=wo, b0=b0, wc=wc, order=order, nperseg=nperseg,
             f_lo=f_lo, f_hi=f_hi, coh_min=coh_min, cross_check=cross_check,
             use_rpm=use_rpm, include_dterm=include_dterm, out_dir=out_dir,
-            adrc_flight=adrc_flight,
+            adrc_flight=adrc_flight, suggest_wc=suggest_wc,
+            save_outputs=save_outputs,
         )
 
-    df = load_blackbox_csv(csv_path)
-    hdr = read_blackbox_header(csv_path)
+    if suggest_wc and any(results[a].get('bandwidth') is None for a in AXIS_NAMES):
+        raise ValueError("results were computed with suggest_wc=False; rerun "
+                         "without passing `results` to get the bandwidth table")
+
+    # Only needed for the extra 60 deg sweep in the bandwidth table
+    if suggest_wc:
+        df = load_blackbox_csv(csv_path)
+        hdr = read_blackbox_header(csv_path)
     # b0 table from each of the three methods
     # Pulls straight from `results` (fit_plant_from_csv_indirect output) and
     # the wc/wo/b0 dicts passed in.
@@ -1218,53 +1241,56 @@ def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
     # vs wc ratio basically says how fast the controller is responding, this should be around 2x
     # if vs wc ratio is too high that means something is off, likely b0
 
-    bw_rows = []
-    bw60_by_axis = {}
-    for axis in AXIS_NAMES:
-        res = results[axis]
-        bw45 = res['bandwidth']
+    bw_table = None
+    bw60_by_axis = {a: None for a in AXIS_NAMES}
+    if suggest_wc:
+        bw_rows = []
+        bw60_by_axis = {}
+        for axis in AXIS_NAMES:
+            res = results[axis]
+            bw45 = res['bandwidth']
 
-        t, r, y, u = get_axis_signals(df, axis)
-        fs = 1.0 / np.median(np.diff(t))
-        bw_fit = res['fit_rpm'] if res.get('fit_rpm') is not None else res
-        bw60 = suggest_bandwidth(r, y, fs, bw_fit, wc[axis], wo[axis], b0[axis],
-                                 hdr=hdr, pm_target=60.0, axis=axis,
-                                 coh_min=coh_min)
-        bw60_by_axis[axis] = bw60
+            t, r, y, u = get_axis_signals(df, axis)
+            fs = 1.0 / np.median(np.diff(t))
+            bw_fit = res['fit_rpm'] if res.get('fit_rpm') is not None else res
+            bw60 = suggest_bandwidth(r, y, fs, bw_fit, wc[axis], wo[axis], b0[axis],
+                                     hdr=hdr, pm_target=60.0, axis=axis,
+                                     coh_min=coh_min)
+            bw60_by_axis[axis] = bw60
 
-        f3, f3sd = bw45['f_3db_hz'], bw45['f_3db_sd']
-        wc_cfg, w3 = bw45['wc_cfg'], bw45['w_3db']
+            f3, f3sd = bw45['f_3db_hz'], bw45['f_3db_sd']
+            wc_cfg, w3 = bw45['wc_cfg'], bw45['w_3db']
 
-        # rad/s, to match the wc / max wc / PM columns either side of it.
-        # The console footer still gives Hz as well.
-        achieved = (f'{w3:.1f} +/- {f3sd * 2 * np.pi:.1f} rad/s'
-                    if f3 == f3 else 'n/a')
-        pk = bw45['cl_peak_db']
-        peak_str = (f"{pk:+.1f} dB @ {bw45['cl_peak_hz']:.1f} Hz"
-                    if pk == pk else 'n/a')
-        vs_wc = f'{wc_cfg:.0f} ({wc_cfg/w3:.1f}x -3dB)' if (f3 == f3 and w3 > 0) else f'{wc_cfg:.0f}'
+            # rad/s, to match the wc / max wc / PM columns either side of it.
+            # The console footer still gives Hz as well.
+            achieved = (f'{w3:.1f} +/- {f3sd * 2 * np.pi:.1f} rad/s'
+                        if f3 == f3 else 'n/a')
+            pk = bw45['cl_peak_db']
+            peak_str = (f"{pk:+.1f} dB @ {bw45['cl_peak_hz']:.1f} Hz"
+                        if pk == pk else 'n/a')
+            vs_wc = f'{wc_cfg:.0f} ({wc_cfg/w3:.1f}x -3dB)' if (f3 == f3 and w3 > 0) else f'{wc_cfg:.0f}'
 
-        def _max_wc(bw):
-            return ('not bounded' if bw['wc_max_at_bound']
-                    else f"{bw['wc_max']:.0f} +/- {bw['wc_max_sd']:.1f} rad/s")
+            def _max_wc(bw):
+                return ('not bounded' if bw['wc_max_at_bound']
+                        else f"{bw['wc_max']:.0f} +/- {bw['wc_max_sd']:.1f} rad/s")
 
-        pm_at_wc = (f"{bw45['pm_cfg']:.1f} +/- {bw45['pm_cfg_sd']:.2f} deg"
-                    if bw45['pm_cfg'] == bw45['pm_cfg'] else 'n/a')
+            pm_at_wc = (f"{bw45['pm_cfg']:.1f} +/- {bw45['pm_cfg_sd']:.2f} deg"
+                        if bw45['pm_cfg'] == bw45['pm_cfg'] else 'n/a')
 
-        # CL peak is still computed in suggest_bandwidth and still drives the
-        # peaking warning and the console footer; it is just not a column.
-        brow = {'axis': axis, 'achieved -3dB': achieved}
-        if adrc_flight:
-            # the flown wc, with the ratio to the achieved -3dB when there is one
-            brow['vs wc'] = vs_wc
-        brow[f"max wc @{bw45['pm_target']:.0f} deg"] = _max_wc(bw45)
-        brow['max wc @60 deg'] = _max_wc(bw60)
-        brow['PM at wc' if adrc_flight else 'PM at proposed wc'] = pm_at_wc
-        bw_rows.append(brow)
+            # CL peak is still computed in suggest_bandwidth and still drives the
+            # peaking warning and the console footer; it is just not a column.
+            brow = {'axis': axis, 'achieved -3dB': achieved}
+            if adrc_flight:
+                # the flown wc, with the ratio to the achieved -3dB when there is one
+                brow['vs wc'] = vs_wc
+            brow[f"max wc @{bw45['pm_target']:.0f} deg"] = _max_wc(bw45)
+            brow['max wc @60 deg'] = _max_wc(bw60)
+            brow['PM at wc' if adrc_flight else 'PM at proposed wc'] = pm_at_wc
+            bw_rows.append(brow)
 
-    bw_table = pd.DataFrame(bw_rows)
+        bw_table = pd.DataFrame(bw_rows)
 
-    display(_style_table(bw_table))
+        display(_style_table(bw_table))
 
     # Same checks as the per-axis console footer, repeated here so the caveats
     # sit next to the numbers they apply to rather than scrolled off above.
@@ -1272,11 +1298,13 @@ def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
     for axis in AXIS_NAMES:
         res = results[axis]
         bw_fit = res['fit_rpm'] if res.get('fit_rpm') is not None else res
-        flags = axis_warnings(res, res['bandwidth'], bw_fit,
+        flags = axis_warnings(res, res['bandwidth'] if suggest_wc else None, bw_fit,
                               b0_values=b0_by_axis[axis], adrc_flight=adrc_flight)
         # a ceiling that is band-limited at 45 deg is band-limited at 60 too,
         # but the 60 deg column can trip the bound flag on its own
-        if bw60_by_axis[axis]['wc_max_at_bound'] and not res['bandwidth']['wc_max_at_bound']:
+        bw60 = bw60_by_axis[axis]
+        if (bw60 is not None and bw60['wc_max_at_bound']
+                and not res['bandwidth']['wc_max_at_bound']):
             flags.append("60 deg ceiling not bounded by this model")
         for fl in flags:
             warn_lines.append(f"[WARNING: {axis:>5}] {fl}")
@@ -1288,27 +1316,29 @@ def show_fit_summary(csv_path, wc, wo, b0, order=2, nperseg=8192, f_lo=0.8,
     else:
         print("\nNo warnings.")
 
-    # --- export both tables as a readable, aligned .txt, alongside the
-    # other outputs -----------------------------------------------------
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
-    base = Path(csv_path).name.split('.')[0]
-    out_tables_txt = out_dir / f'{base} Fit summary tables.txt'
-    with open(out_tables_txt, 'w') as fh:
-        title = f"{base} -- plant fit summary"
-        fh.write(f"{title}\n{'=' * len(title)}\n\n")
+    if save_outputs:
+        # --- export both tables as a readable, aligned .txt, alongside the
+        # other outputs -----------------------------------------------------
+        out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+        base = Path(csv_path).name.split('.')[0]
+        out_tables_txt = out_dir / f'{base} Fit summary tables.txt'
+        with open(out_tables_txt, 'w') as fh:
+            title = f"{base} -- plant fit summary"
+            fh.write(f"{title}\n{'=' * len(title)}\n\n")
 
-        fh.write("b0 (deg/s per u) by method\n")
-        fh.write("--------------------------\n")
-        fh.write(_txt_table(b0_table))
+            fh.write("b0 (deg/s per u) by method\n")
+            fh.write("--------------------------\n")
+            fh.write(_txt_table(b0_table))
 
-        fh.write("\n\nBandwidth\n")
-        fh.write("---------\n")
-        fh.write(_txt_table(bw_table))
+            if bw_table is not None:
+                fh.write("\n\nBandwidth\n")
+                fh.write("---------\n")
+                fh.write(_txt_table(bw_table))
 
-        fh.write("\n\nWarnings\n")
-        fh.write("--------\n")
-        fh.write('\n'.join(warn_lines) if warn_lines else 'None.')
-        fh.write("\n")
-    print(f"Saved summary tables to {out_tables_txt}")
+            fh.write("\n\nWarnings\n")
+            fh.write("--------\n")
+            fh.write('\n'.join(warn_lines) if warn_lines else 'None.')
+            fh.write("\n")
+        print(f"Saved summary tables to {out_tables_txt}")
 
     return results, b0_table, bw_table
